@@ -63,7 +63,7 @@ static HookFunction initFunction([] ()
 			renderWindows.insert({ window->GetName(), window });
 		});
 
-		auto windowOrder =
+		std::list<std::string> windowOrder =
 #ifndef USE_NUI_ROOTLESS
 		{
 			"root"
@@ -72,6 +72,9 @@ static HookFunction initFunction([] ()
 		g_nuiFocusStack
 #endif
 		;
+
+		// show on top = render last
+		std::reverse(windowOrder.begin(), windowOrder.end());
 
 		for (const auto& windowName : windowOrder)
 		{
