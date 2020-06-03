@@ -383,6 +383,7 @@ static CDataFileMountInterface** g_dataFileMounters;
 
 // TODO: this might need to be a ref counter instead?
 static std::set<std::string, IgnoreCaseLess> g_permanentItyps;
+static std::map<uint32_t, std::string> g_itypHashList;
 
 class CfxProxyItypMounter : public CDataFileMountInterface
 {
@@ -408,6 +409,8 @@ public:
 	{
 		// parse dir/dir/blah.ityp into blah
 		std::string baseName = ParseBaseName(entry);
+
+		g_itypHashList.insert({ HashString(baseName.c_str()), baseName });
 
 		uint32_t slotId;
 
@@ -1034,12 +1037,43 @@ void LoadManifest(const char* tagName)
 
 		rage::fiDevice::Unmount("localPack:/");
 
+		struct CItypDependencies 
+		{
+			uint32_t itypName;
+			uint32_t manifestFlags;
+
+			atArray<uint32_t> itypDepArray;
+		};
+
+		struct manifestData
+		{
+			char pad[48];
+			atArray<CItypDependencies> itypDependencies;
+		}* manifestChunk = (manifestData*)manifestChunkPtr;
+
+		for (auto& dep : manifestChunk->itypDependencies)
+		{
+			if (auto it = g_itypHashList.find(dep.itypName); it != g_itypHashList.end())
+			{
+				auto name = fmt::sprintf("dummy/%s.ityp", it->second);
+				trace("Fixing manifest-required #typ dependency for %s\n", name);
+
+				auto mounter = LookupDataFileMounter("DLC_ITYP_REQUEST");
+
+				DataFileEntry entry = { 0 };
+				strcpy_s(entry.name, name.c_str());
+
+				mounter->UnmountFile(&entry);
+			}
+		}
+
 		_loadManifestChunk(manifestChunkPtr);
 		_clearManifestChunk(manifestChunkPtr);
 	}
 }
 
 #include <EntitySystem.h>
+#include <RageParser.h>
 
 struct CPedModelInfo
 {
@@ -1574,6 +1608,40 @@ static void LoadReplayDlc(void* ecw)
 	LoadDataFiles();
 }
 
+static void (*g_origfwMapTypes__ConstructArchetypes)(void* mapTypes, int32_t idx);
+
+static void fwMapTypes__ConstructArchetypesStub(void* mapTypes, int32_t idx)
+{
+	// free this archetype file since we're recreating it anyway
+	// this should be safe, as an asset won't get loaded without it having been unloaded before
+	rage__fwArchetypeManager__FreeArchetypes(idx);
+
+	g_origfwMapTypes__ConstructArchetypes(mapTypes, idx);
+}
+
+static void (*g_origfwMapDataStore__FinishLoading)(void* store, int32_t idx, CMapData** data);
+
+static void fwMapDataStore__FinishLoadingHook(streaming::strStreamingModule* store, int32_t idx, CMapData** data)
+{
+	CMapData* mapData = *data;
+
+	static_assert(offsetof(CMapData, name) == 8, "CMapData::name");
+
+	for (fwEntityDef* entity : mapData->entities)
+	{
+		if (entity->GetTypeIdentifier()->m_nameHash == HashRageString("CMloInstanceDef"))
+		{
+			if (!(mapData->contentFlags & 8))
+			{
+				trace("Fixed fwMapData contentFlags (missing 'interior' flag) in %s.\n", streaming::GetStreamingNameForIndex(idx + store->baseIdx));
+				mapData->contentFlags |= 8;
+			}
+		}
+	}
+
+	return g_origfwMapDataStore__FinishLoading(store, idx, data);
+}
+
 static HookFunction hookFunction([] ()
 {
 	// process streamer-loaded resource: check 'free instantly' flag even if no dependencies exist (change jump target)
@@ -1829,6 +1897,20 @@ static HookFunction hookFunction([] ()
 	{
 		MH_Initialize();
 		MH_CreateHook(hook::get_pattern("4C 63 C2 33 ED 46 0F B6 0C 00 8B 41 4C", -18), fwMapTypesStore__Unload, (void**)&g_origUnloadMapTypes);
+		MH_EnableHook(MH_ALL_HOOKS);
+	}
+
+	// fwMapDataStore::FinishLoading map flag fixing
+	{
+		MH_Initialize();
+		MH_CreateHook(hook::get_pattern("25 00 0C 00 00 3D 00 08 00 00 49 8B 06", -0x6F), fwMapDataStore__FinishLoadingHook, (void**)&g_origfwMapDataStore__FinishLoading);
+		MH_EnableHook(MH_ALL_HOOKS);
+	}
+
+	// fwMapTypes::ConstructArchetypes hook (for #typ override issues with different sizes)
+	{
+		MH_Initialize();
+		MH_CreateHook(hook::get_pattern("FF 50 28 0F B7 46 20 33 ED", -0x21), fwMapTypes__ConstructArchetypesStub, (void**)&g_origfwMapTypes__ConstructArchetypes);
 		MH_EnableHook(MH_ALL_HOOKS);
 	}
 

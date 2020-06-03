@@ -236,12 +236,12 @@ void MigrateSessionCopy(char* target, char* source)
 
 	ScSessionAddr* sessionAddress = reinterpret_cast<ScSessionAddr*>(target - 16);
 	
-	std::unique_ptr<NetBuffer> msgBuffer(new NetBuffer(64));
+	std::unique_ptr<net::Buffer> msgBuffer(new net::Buffer(64));
 
 	msgBuffer->Write<uint32_t>((sessionAddress->addr.localAddr.ip.addr & 0xFFFF) ^ 0xFEED);
 	msgBuffer->Write<uint32_t>(sessionAddress->addr.unkKey1);
 
-	g_netLibrary->SendReliableCommand("msgHeHost", msgBuffer->GetBuffer(), msgBuffer->GetCurLength());
+	g_netLibrary->SendReliableCommand("msgHeHost", reinterpret_cast<const char*>(msgBuffer->GetBuffer()), msgBuffer->GetCurOffset());
 }
 
 static hook::cdecl_stub<bool()> isNetworkHost([] ()
@@ -1477,6 +1477,9 @@ static bool BeforeReplayLoadHook()
 
 	g_netLibrary->Disconnect("Entering Rockstar Editor");
 	g_netLibrary->FinalizeDisconnect();
+
+	// stop scripts from this point
+	Instance<ICoreGameInit>::Get()->SetVariable("networkTimedOut");
 
 	return g_origBeforeReplayLoad();
 }
